@@ -1,76 +1,34 @@
 #!/usr/bin/env bash
 
-detect_or_setup_void_packages() {
-    if [ -d "$HOME/void-packages" ]; then
-        VPDIR="$HOME/void-packages"
-    elif [ -d "/usr/src/void-packages" ]; then
-        VPDIR="/usr/src/void-packages"
-    else
-        echo "[!] void-packages not found — cloning..."
-        git clone https://github.com/void-linux/void-packages.git "$HOME/void-packages" || { echo "Clone failed"; exit 1; }
-        cd "$HOME/void-packages" || exit 1
-        ./xbps-src binary-bootstrap || exit 1
-        VPDIR="$HOME/void-packages"
-        echo "[+] void-packages ready"
-    fi
-    echo "$VPDIR"
-}
-
-VPDIR=$(detect_or_setup_void_packages)
-
-
+# Betik Ayarları
 set -o pipefail
 set -o nounset
-#set -o errexit  # intentionally not set; script handles errors
+# set -o errexit  # Hata durumlarını manuel kontrol ettiğimiz için devre dışı
 
-# Colors
-GREEN="\e[32m";
-YELLOW="\e[33m";
-RED="\e[31m";
-BLUE="\e[34m";
-RESET="\e[0m"
+# Renk Tanımlamaları
+GREEN="\e[32m"; YELLOW="\e[33m"; RED="\e[31m"; BLUE="\e[34m"; RESET="\e[0m"
 
-# Globals
+# Global Değişkenler
 ARCH=$(uname -m)
 LOGFILE="/var/log/void-wrapper.log"
 NONINTERACTIVE=false
 FORCE_ACTION=false
 VERBOSE=false
 
-# If /var/log not writable, fallback to user's home
+# Log Dosyası Ayarı
 if [[ ! -w "$(dirname "$LOGFILE")" ]]; then
   LOGFILE="$HOME/.local/share/void-wrapper.log"
   mkdir -p "$(dirname "$LOGFILE")" 2>/dev/null || true
 fi
 
+# Yardımcı Fonksiyonlar 🛠️
+
 log() { printf '%s\t%s\n' "$(date --iso-8601=seconds)" "$1" >> "$LOGFILE" 2>/dev/null || true; }
-
-# --- Utility functions ---
-ask_yes_no() {
-  local prompt="$1" default_yes=${2:-false}
-  if $NONINTERACTIVE; then
-    $default_yes && return 0 || return 1
-  fi
-  local yn
-  if $default_yes; then
-    read -r -p "$prompt [Y/n]: " yn
-    [[ -z "$yn" ]] && yn=Y
-  else
-    read -r -p "$prompt [y/N]: " yn
-    [[ -z "$yn" ]] && yn=N
-  fi
-  case "$yn" in
-    [Yy]*) return 0;;
-    *) return 1;;
-  esac
-}
-
 err() { echo -e "${RED}:: ERROR:${RESET} $*"; log "ERROR: $*"; }
 info() { echo -e "${GREEN}:: $*${RESET}"; log "INFO: $*"; }
 warn() { echo -e "${YELLOW}:: $*${RESET}"; log "WARN: $*"; }
 note() { echo -e "${BLUE}:: $*${RESET}"; log "NOTE: $*"; }
 
-# Determine real user even if run with sudo
 get_real_user(){
   if [ "$EUID" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
     printf '%s' "$SUDO_USER"
@@ -80,7 +38,6 @@ get_real_user(){
 }
 get_real_home(){ getent passwd "$(get_real_user)" | cut -d: -f6; }
 
-# Run with sudo if needed
 need_sudo(){
   if [ "$EUID" -ne 0 ]; then
     if command -v sudo &>/dev/null; then
@@ -94,7 +51,6 @@ need_sudo(){
   fi
 }
 
-# Run command as real user (for xbps-src operations)
 run_as_user(){
     local ru
     ru=$(get_real_user)
@@ -114,12 +70,30 @@ run_as_user(){
     fi
 }
 
-# Try to find void-packages repo in common locations
+ask_yes_no() {
+  local prompt="$1" default_yes=${2:-false}
+  if $NONINTERACTIVE; then
+    $default_yes && return 0 || return 1
+  fi
+  local yn
+  if $default_yes; then
+    read -r -p "$prompt [Y/n]: " yn
+    [[ -z "$yn" ]] && yn=Y
+  else
+    read -r -p "$prompt [y/N]: " yn
+    [[ -z "$yn" ]] && yn=N
+  fi
+  case "$yn" in
+    [Yy]*) return 0;;
+    *) return 1;;
+  esac
+}
+
 find_void_packages(){
   if [[ -n "${VOID_PACKAGES_DIR:-}" ]]; then echo "$VOID_PACKAGES_DIR"; return 0; fi
   local user_home
   user_home=$(get_real_home)
-  local candidates=("$user_home/void-packages" "$user_home/src/void-packages" "$user_home/src/void-packages" "/srv/void-packages" "/usr/local/src/void-packages" "/opt/void-packages" "/void-packages")
+  local candidates=("$user_home/void-packages" "/usr/src/void-packages" "/opt/void-packages")
   for c in "${candidates[@]}"; do
     if [[ -d "$c" ]]; then
       printf '%s' "$c"; return 0
@@ -128,41 +102,24 @@ find_void_packages(){
   return 1
 }
 
-# Check and install missing base tools (git, xtools) - returns 0 on success
 ensure_tools(){
   local missing=()
   command -v git &>/dev/null || missing+=(git)
-  # xtools provides xnew and other helpers; if not present, add xtools
-  if ! command -v xnew &>/dev/null; then
-    missing+=(xtools)
-  fi
+  if ! command -v xnew &>/dev/null; then missing+=(xtools); fi
   if [[ ${#missing[@]} -gt 0 ]]; then
-    warn "Missing tools: ${missing[*]}. Will attempt to install via xbps."
+    warn "Missing tools: ${missing[*]}."
     if ask_yes_no "Install missing tools (${missing[*]}) via xbps?" true; then
-      if need_sudo xbps-install -Sy "${missing[@]}"; then
-        info "Tools installed."
-      else
-        err "Failed to install required tools: ${missing[*]}"
-        return 1
-      fi
+      if need_sudo xbps-install -Sy "${missing[@]}"; then info "Tools installed.";
+      else err "Failed to install required tools: ${missing[*]}"; return 1; fi
     else
-      err "Required tools not installed. Aborting."
-      return 1
+      err "Required tools not installed. Aborting."; return 1
     fi
-  fi
-  return 0
+  fi; return 0
 }
 
-# Setup void-packages automatically (binary-bootstrap etc.)
 setup_void_packages(){
-  local vpdir
-  vpdir="$1"
-  if [[ -z "$vpdir" ]]; then
-    local user_home
-    user_home=$(get_real_home)
-    vpdir="$user_home/void-packages"
-  fi
-
+  local vpdir="$1"
+  if [[ -z "$vpdir" ]]; then local user_home=$(get_real_home); vpdir="$user_home/void-packages"; fi
   info "void-packages not found. Preparing to setup at: $vpdir"
   log "SETUP: start -> $vpdir"
 
@@ -173,94 +130,64 @@ setup_void_packages(){
     if ask_yes_no "Use existing directory and run a git pull there?" true; then
       pushd "$vpdir" >/dev/null 2>&1 || return 1
       run_as_user git pull --ff-only || true
-      popd >/dev/null 2>&1
-      return 0
-    else
-      return 1
-    fi
+      popd >/dev/null 2>&1; return 0
+    else return 1; fi
   fi
 
-  # Clone
   if ! $NONINTERACTIVE; then
     if ! ask_yes_no "Clone void-packages from upstream into $vpdir?" true; then
-      warn "User declined clone. Aborting setup."
-      return 1
+      warn "User declined clone. Aborting setup."; return 1
     fi
   fi
 
   run_as_user mkdir -p "$(dirname "$vpdir")" || true
   if ! run_as_user git clone --depth 1 https://github.com/void-linux/void-packages.git "$vpdir"; then
-    err "git clone failed. Please check network or git settings."
-    return 1
+    err "git clone failed."; return 1
   fi
 
-  # Ensure etc/conf exists and set Xbps restricted if needed
-  if [[ -f "$vpdir/etc/conf" ]]; then
-    if ! run_as_user grep -q '^XBPS_ALLOW_RESTRICTED=' "$vpdir/etc/conf" 2>/dev/null; then
-      run_as_user bash -c "echo 'XBPS_ALLOW_RESTRICTED=yes' >> '$vpdir/etc/conf'"
-    fi
-  else
-    run_as_user bash -c "mkdir -p '$vpdir/etc' && echo 'XBPS_ALLOW_RESTRICTED=yes' > '$vpdir/etc/conf'"
+  if [[ ! -f "$vpdir/etc/conf" ]]; then run_as_user mkdir -p "$vpdir/etc"; fi
+  if ! run_as_user grep -q '^XBPS_ALLOW_RESTRICTED=' "$vpdir/etc/conf" 2>/dev/null; then
+    run_as_user bash -c "echo 'XBPS_ALLOW_RESTRICTED=yes' >> '$vpdir/etc/conf'"
   fi
 
-  # Binary bootstrap
   note "Running xbps-src binary-bootstrap. This may take a while."
   pushd "$vpdir" >/dev/null || return 1
   if ! run_as_user ./xbps-src binary-bootstrap; then
-    err "binary-bootstrap failed. Check logs in $vpdir/hostdir or run manually."
-    popd >/dev/null
-    return 1
+    err "binary-bootstrap failed."; popd >/dev/null; return 1
   fi
   popd >/dev/null
-  info "void-packages setup complete."
-  return 0
+  info "void-packages setup complete."; return 0
 }
 
-# Build and install package from xbps-src
+VPDIR=$(find_void_packages || true)
+
+# --- Temel İşlem Fonksiyonları ---
+
 build_and_install_from_src(){
   local pkg="$1"
   local vp
   vp=$(find_void_packages || true)
+
+  # Setup Check
   if [[ -z "$vp" ]]; then
-    # Decide whether to auto-run setup or ask
-    if $NONINTERACTIVE; then
-      if ! setup_void_packages; then
-        err "Automatic void-packages setup failed."
-        return 1
-      fi
-    else
-      if ask_yes_no "void-packages not found. Do you want to setup void-packages now?" true; then
-        if ! setup_void_packages; then err "Setup failed"; return 1; fi
-      else
-        err "void-packages missing and user declined setup."
-        return 1
-      fi
-    fi
+    if ! setup_void_packages; then err "void-packages setup failed."; return 1; fi
     vp=$(find_void_packages || true)
     if [[ -z "$vp" ]]; then err "Cannot locate void-packages after setup."; return 1; fi
   fi
 
-  # Check srcpkg exists, else offer to create template
+  # Template Check/Creation
   if [[ ! -d "$vp/srcpkgs/$pkg" ]]; then
     warn "Package template not found in void-packages: $pkg"
-    if ask_yes_no "Create a new template using xnew for '$pkg' in void-packages? (requires xtools)" false; then
+    if ask_yes_no "Create a new template using xnew for '$pkg' in void-packages?" false; then
       if ! command -v xnew &>/dev/null; then
         warn "xtools (xnew) not found. Attempting to install xtools."
-        if ! need_sudo xbps-install -y xtools; then
-          err "Failed to install xtools. Cannot create template."
-          return 1
-        fi
+        if ! need_sudo xbps-install -y xtools; then err "Failed to install xtools."; return 1; fi
       fi
       pushd "$vp" >/dev/null || return 1
-      if ! run_as_user xnew "$pkg"; then
-        err "xnew failed to create template for $pkg"
-        popd >/dev/null
-        return 1
-      fi
+      if ! run_as_user xnew "$pkg"; then err "xnew failed to create template for $pkg"; popd >/dev/null; return 1; fi # Düzeltildi
       popd >/dev/null
     else
-      err "Template missing and user declined creation."
-      return 1
+      err "Template missing and user declined creation."; return 1
     fi
   fi
 
@@ -270,41 +197,28 @@ build_and_install_from_src(){
 
   if [[ ! -d "masterdir" ]]; then
     note "masterdir missing; running binary-bootstrap"
-    if ! run_as_user ./xbps-src binary-bootstrap; then
-      err "binary-bootstrap failed."
-      popd >/dev/null
-      return 1
-    fi
+    if ! run_as_user ./xbps-src binary-bootstrap; then err "binary-bootstrap failed."; popd >/dev/null; return 1; fi
   fi
 
   note "Building package '$pkg' via xbps-src pkg"
   log "BUILD_START: $pkg"
-  if ! run_as_user ./xbps-src pkg "$pkg"; then
-    err "xbps-src build failed for $pkg. Check build logs in hostdir."; popd >/dev/null; return 1
-  fi
+  if ! run_as_user ./xbps-src pkg "$pkg"; then err "xbps-src build failed for $pkg."; popd >/dev/null; return 1; fi
 
-  # Find produced binary
   local repo_base="$vp/hostdir/binpkgs"
   local repo_path
   if [[ -d "$repo_base/$ARCH" ]]; then repo_path="$repo_base/$ARCH"; else repo_path="$repo_base"; fi
   local found_path=""
   for sub in "" "/nonfree" "/multilib" "/multilib/nonfree"; do
-    if compgen -G "$repo_path${sub}/${pkg}-*.xbps" >/dev/null; then
-      found_path="$repo_path${sub}"
-      break
-    fi
+    if compgen -G "$repo_path${sub}/${pkg}-*.xbps" >/dev/null; then found_path="$repo_path${sub}"; break; fi
   done
-  if [[ -z "$found_path" ]]; then err "Built package not found under hostdir/binpkgs. Aborting."; popd >/dev/null; return 1; fi
+  if [[ -z "$found_path" ]]; then err "Built package not found."; popd >/dev/null; return 1; fi
 
   note "Installing package from repository: $found_path"
   if need_sudo xbps-install --repository="$found_path" -y "$pkg"; then
     info "Package $pkg installed successfully from source-built repo."
-    popd >/dev/null
-    return 0
+    popd >/dev/null; return 0
   else
-    err "Failed to install built package $pkg via xbps-install --repository."
-    popd >/dev/null
-    return 1
+    err "Failed to install built package $pkg via xbps-install --repository."; popd >/dev/null; return 1
   fi
 }
 
@@ -314,30 +228,24 @@ install_with_fallback(){
   for a in "${args[@]}"; do [[ "$a" != -* ]] && pkgs+=("$a"); done
 
   if [[ ${#pkgs[@]} -eq 0 ]]; then
-    note "Running xbps-install ${args[*]}"
     need_sudo xbps-install "${args[@]}" || return $?
     return 0
   fi
 
   note "Attempting binary install: ${pkgs[*]}"
 
-  # Binary install denemesi
   need_sudo xbps-install "${args[@]}"
   local exit_code=$?
 
   if [[ $exit_code -eq 0 ]]; then
-    info "Binary install succeeded."
-    return 0
+    info "Binary install succeeded."; return 0
   elif [[ $exit_code -eq 130 ]]; then
-    # Ctrl+C ile iptal edildi
-    warn "Installation cancelled by user (SIGINT). Skipping xbps-src fallback."
-    return 130
+    warn "Installation cancelled by user (SIGINT). Skipping xbps-src fallback."; return 130
   else
     warn "Binary install failed (exit code $exit_code). Trying xbps-src fallback."
     log "FALLBACK: ${pkgs[*]}"
   fi
 
-  # Fallback build
   for p in "${pkgs[@]}"; do
     if ! build_and_install_from_src "$p"; then
       err "Fallback build/install failed for $p"
@@ -345,6 +253,44 @@ install_with_fallback(){
   done
 }
 
+route_command_to_xbps() {
+  local args=("$@")
+  local is_remove=false
+  local first_arg="${args[0]:-}"
+
+  # Kaldırmaya özel bayrakları (R, O, F) kontrol et.
+  local remove_only_flags_regex="-R|-O|-F"
+
+  for arg in "${args[@]}"; do
+    if [[ "$arg" =~ $remove_only_flags_regex ]]; then
+      is_remove=true; break
+    fi
+  done
+
+  # --- remove (xbps-remove) ---
+  if $is_remove; then
+    note "Detected package removal/cleanup flag(s) in: ${args[*]} -> Forwarding to xbps-remove."
+
+    # Özel -Oo temizleme komutunu ayrı işle
+    if [[ "$first_arg" == "-Oo" ]]; then
+      cleanup # Özel cleanup fonksiyonunu çağırır
+    else
+      need_sudo xbps-remove "${args[@]}"
+    fi
+    return $?
+  fi
+
+  # --- install/update (xbps-install + Fallback) ---
+
+  if [[ "$first_arg" =~ ^-[A-Za-z]+$ ]]; then
+    note "Detected installation/update flag(s) in: ${args[*]} -> Forwarding to xbps-install with fallback."
+  else
+    note "Detected package name(s) or unknown command: ${args[*]} -> Forwarding to xbps-install with fallback."
+  fi
+
+  install_with_fallback "${args[@]}"
+  return $?
+}
 
 # Search helper
 search_pkg(){
@@ -357,7 +303,7 @@ search_pkg(){
 vpsync(){
   local vp
   vp=$(find_void_packages || true)
-  if [[ -z "$vp" ]]; then err "void-packages not found. Run with --src or run setup first."; return 1; fi
+  if [[ -z "$vp" ]]; then err "void-packages not found."; return 1; fi
   pushd "$vp" >/dev/null || return 1
   run_as_user git pull --ff-only || { warn "git pull failed"; popd >/dev/null; return 1; }
   popd >/dev/null
@@ -386,15 +332,14 @@ create_template(){
       setup_void_packages || return 1
       vp=$(find_void_packages || true) || return 1
     else
-      err "void-packages required to create templates."
-      return 1
+      err "void-packages required to create templates."; return 1
     fi
   fi
   pushd "$vp" >/dev/null || return 1
   if ! command -v xnew &>/dev/null; then
     warn "xtools (xnew) not found. Installing xtools"
     need_sudo xbps-install -y xtools || { err "Failed to install xtools"; popd >/dev/null; return 1; }
-  fi
+  fi # Düzeltildi
   run_as_user xnew "$pkg" || { err "xnew failed"; popd >/dev/null; return 1; }
   popd >/dev/null
   info "Template created for $pkg in $vp/srcpkgs/$pkg"
@@ -407,29 +352,29 @@ void - Advanced Void package helper
 Usage: void [options] <package|command>
 Commands:
   <name>                Search (xbps-query -Rs <name>) if single non-option arg
-  -S [--install] ...    Try xbps-install; on failure automatically attempt xbps-src fallback
-  -Su                   Run xbps-install -Su (system upgrade)
-  -R <pkg>...           Remove packages (xbps-remove)
-  --src <pkg>           Force build and install with xbps-src
+  --src <pkg>           Force build and install with xbps-src (Fallback)
   --new <pkg>           Create a new template (xnew)
   -V, --vpsync          Update local void-packages (git pull)
-  -Oo                   Cleanup orphans and cache
   --setup               Setup void-packages (clone + binary-bootstrap)
-  --yes, -y             Non-interactive / assume yes
+  -y | --yes            Non-interactive / assume yes
   --verbose             More logs
-  -h|--help             Show this help
+  -h | --help           Show this help
+
+Generic Operations:
+  All standard xbps-install, xbps-remove, and combined flags (e.g., -Syu, -R, -Oo)
+  are automatically detected and forwarded to the correct xbps command.
 
 Notes:
-  - This wrapper will attempt to minimize manual steps. It can auto-clone void-packages,
-    run binary-bootstrap, create templates with xnew and build packages if binary install fails.
-  - Use --yes to run non-interactively. Use with caution.
+  - The wrapper automatically detects if a command is for installation/update or removal/cleanup.
+  - Installation commands will automatically fall back to xbps-src if binary install fails.
 EOF
 }
 
-# --- Argument parsing (simple) ---
+# --- Ana Çalışma Bloğu 🚀 ---
+
 if [[ $# -eq 0 ]]; then usage; exit 0; fi
 
-# Handle global flags
+# Global bayrakları işle
 ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -442,38 +387,18 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# If verbose, echo logfile location
 $VERBOSE && info "Log file: $LOGFILE"
 
-# If single arg and not option -> search
+# Tek argüman ve seçenek değilse -> arama yap
 if [[ ${#ARGS[@]} -eq 1 && "${ARGS[0]:0:1}" != "-" ]]; then
   search_pkg "${ARGS[0]}"
   exit 0
 fi
 
-# Main command dispatch
+# Özel komutları ve yönlendirmeyi işle
 case "${ARGS[0]:-}" in
-  -S|--install)
-    shift
-    install_with_fallback "${ARGS[@]:1}"
-    ;;
-  -Su)
-    note "Performing system upgrade"
-    need_sudo xbps-install -Su
-    ;;
-  -R)
-    if [[ ${#ARGS[@]} -lt 2 ]]; then err "No package specified for removal"; usage; exit 1; fi
-    need_sudo xbps-remove "${ARGS[@]:1}"
-    ;;
-  -V|--vpsync)
-    vpsync
-    ;;
   --src)
-    if [[ ${#ARGS[@]} -lt 2 ]]; then
-      err "No package specified for --src"
-      usage
-      exit 1
-    fi
+    if [[ ${#ARGS[@]} -lt 2 ]]; then err "No package specified for --src"; usage; exit 1; fi
     build_and_install_from_src "${ARGS[1]}"
     exit $?
     ;;
@@ -481,12 +406,12 @@ case "${ARGS[0]:-}" in
     if [[ ${#ARGS[@]} -lt 2 ]]; then err "No package specified for --new"; usage; exit 1; fi
     create_template "${ARGS[1]}"
     ;;
-  -Oo)
-    cleanup
+  -V|--vpsync)
+    vpsync
     ;;
   *)
-    # Default: forward to xbps-install with fallback
-    install_with_fallback "${ARGS[@]}"
+    # Varsayılan: Tüm diğer argümanları yönlendir (-Syu, -R, -Oo, paket adı, vs.)
+    route_command_to_xbps "${ARGS[@]}"
     ;;
 esac
 
