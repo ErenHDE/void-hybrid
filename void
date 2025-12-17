@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 
-# Betik Ayarları
 set -o pipefail
 set -o nounset
-# set -o errexit  # Hata durumlarını manuel kontrol ettiğimiz için devre dışı
 
 # Renk Tanımlamaları
 GREEN="\e[32m"; YELLOW="\e[33m"; RED="\e[31m"; BLUE="\e[34m"; RESET="\e[0m"
